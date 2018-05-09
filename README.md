@@ -1,2 +1,2 @@
-# P1ProbeWiseProcessing
-The code used to create the glmm and gamlss output from the 5hmC and 5mC Illumina EPIC methylation array.
+# P1 Differential methylation analysis
+Probe-wise differential methylation analysis using glmmTMB for 5mC and gamlss for 5hmC
