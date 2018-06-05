@@ -1,0 +1,166 @@
+---
+title: "EPIC_beta_regression"
+author: "Ben Johnson"
+date: "6/4/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loadlibs}
+
+library(plyr)
+library(dplyr)
+
+```
+
+
+```{r divintochnks}
+#Read in the 5mC beta value matrix
+load("./Input/oxBSMLE_betas.RData")
+
+#Combine the cingulate and parietal beta value matrices
+methylcyto.c.df <- as.data.frame(methylcyto.c)
+methylcyto.c.df$probes <- rownames(methylcyto.c.df)
+
+methylcyto.p.df <- as.data.frame(methylcyto.p)
+methylcyto.p.df$probes <- rownames(methylcyto.p.df)
+
+#Join by common probes
+all_bvals <- plyr::join(methylcyto.c.df, methylcyto.p.df, by = "probes")
+all_bvals$probes <- NULL
+all_bvals <- subset(all_bvals, complete.cases(all_bvals))
+all_bvals.t <- as.data.frame(t(methylcyto.c))
+
+##Chunk the data frame for multiple node processing
+all_bvals.t.chnk1 <- all_bvals.t[,c(1:100000)]
+all_bvals.t.chnk2 <- all_bvals.t[,c(100001:200000)]
+all_bvals.t.chnk3 <- all_bvals.t[,c(200001:300000)]
+all_bvals.t.chnk4 <- all_bvals.t[,c(300001:400000)]
+all_bvals.t.chnk5 <- all_bvals.t[,c(400001:500000)]
+all_bvals.t.chnk6 <- all_bvals.t[,c(500001:600000)]
+all_bvals.t.chnk7 <- all_bvals.t[,c(600001:700000)]
+all_bvals.t.chnk8 <- all_bvals.t[,c(700001:764742)]
+
+##Save all the chunks as rda files
+saveRDS(all_bvals.t.chnk1, "./Output_beta_chunks_5mC/all_bvals.t.chnk1.rda")
+saveRDS(all_bvals.t.chnk2, "./Output_beta_chunks_5mC/all_bvals.t.chnk2.rda")
+saveRDS(all_bvals.t.chnk3, "./Output_beta_chunks_5mC/all_bvals.t.chnk3.rda")
+saveRDS(all_bvals.t.chnk4, "./Output_beta_chunks_5mC/all_bvals.t.chnk4.rda")
+saveRDS(all_bvals.t.chnk5, "./Output_beta_chunks_5mC/all_bvals.t.chnk5.rda")
+saveRDS(all_bvals.t.chnk6, "./Output_beta_chunks_5mC/all_bvals.t.chnk6.rda")
+saveRDS(all_bvals.t.chnk7, "./Output_beta_chunks_5mC/all_bvals.t.chnk7.rda")
+saveRDS(all_bvals.t.chnk8, "./Output_beta_chunks_5mC/all_bvals.t.chnk8.rda")
+```
+
+```{r glmmtmb}
+
+#This is a boilerplate script to process a single chunk of probes on a 40 core node
+
+library(plyr)
+library(dplyr)
+library(glmmTMB)
+library(parallel)
+
+#Load in raw beta value matrix
+all_bvals.t.chnk1 <- readRDS("./Output_beta_chunks_5mC/all_bvals.t.chnk1.rda")
+
+#New meta data that also includes the glial proportions
+metadata <- read.table("./meta_data.txt", header = T, check.names = F, stringsAsFactors = F)
+
+#Get the glial cell composition
+glial <- metadata$glial[which(metadata$Assay == "A")]
+
+#Build the design
+
+C_None <- as.factor(c(rep(1, 3), rep(0, 6)))
+
+C_Limbic <- as.factor(c(rep(0, 3), rep(1, 3), rep(0, 3)))
+
+C_Neocortical <- as.factor(c(rep(0, 6), rep(1, 3)))
+
+P_None <- as.factor(c(rep(1, 3), rep(0, 6)))
+
+P_Limbic <- as.factor(c(rep(0, 3), rep(1, 3), rep(0, 3)))
+
+P_Neocortical <- as.factor(c(rep(0, 6), rep(1, 3)))
+
+#Slide as a random effect
+randeff <- as.factor(metadata$Slide[metadata$Assay == "A"])
+
+#Create the coefs for plotting with se
+createCoeftab <- function(TMB) {
+    bTMB <- fixef(TMB)$cond[-1]
+    seTMB <- diag(vcov(TMB)$cond)[-1]
+    nms <- names(bTMB)
+    df <- data.frame(model    = rep(c("glmmTMB"), each = 3),
+                     term     = nms,
+                     estimate = unname(c(bTMB)))
+    df <- transform(df,
+                    upper = estimate + sqrt(c(seTMB)),
+                    lower = estimate - sqrt(c(seTMB)))
+    df
+}
+
+#Beta regression with a logit link function
+EPIC.beta.fit <- function(x, cellcomp, randeff) {
+  x <- as.data.frame(x)
+  x$randeff <- randeff
+  x$glial <- cellcomp
+  
+  #Subset the data to stratify by brain region
+  cing.data <- x[1:9,]
+  pari.data <- x[10:18,]
+
+  #Fit models for all tissues
+  #Fit with beta regression with C_None as the reference
+  cnone.fit <- glmmTMB(x ~ C_Limbic + C_Neocortical + glial + (1 | randeff), data = cing.data, family = list(family = "beta", link = "logit"), se = T)
+  #Calc LRT p-values for cingulate tissues relative to C_none
+  cnone.lrt <- drop1(cnone.fit, scope = c("C_Limbic", "C_Neocortical"), test = "Chisq")
+  #Grab Wald z-stat for region level analysis
+  sum.stat.clim <- summary(cnone.fit)$coefficients$cond[,3]["C_Limbic1"]
+  sum.stat.cpari <- summary(cnone.fit)$coefficients$cond[,3]["C_Neocortical1"]
+  sum.stat <- rbind(sum.stat.clim, sum.stat.cpari)
+
+  #Get the beta estimates for fold-change calcs
+  cnone.fit.est <- createCoeftab(cnone.fit)[1:2,]
+  #Extract the LRT p-values *UNADJUSTED*
+  #None as the ref for cingulate
+  cnone.fit.lrtpval <- cnone.lrt$`Pr(>Chi)`[2:3]
+  #Build the output df
+  cnone.fit.est$pval <- cnone.fit.lrtpval
+  #Add the z-stat
+  cnone.fit.est$zstat <- sum.stat
+
+  #Fit models for parietal tissues
+  #Fit with beta regression with C_None as the reference
+  pnone.fit <- glmmTMB(x ~ P_Limbic + P_Neocortical + glial + (1 | randeff), data = pari.data, family = list(family = "beta", link = "logit"), se = T)
+  #Calc LRT p-values for cingulate tissues relative to P_none
+  pnone.lrt <- drop1(pnone.fit, scope = c("P_Limbic", "P_Neocortical"), test = "Chisq")
+  #Grab Wald z-stat for region level analysis
+  sum.stat.clim <- summary(pnone.fit)$coefficients$cond[,3]["P_Limbic1"]
+  sum.stat.cpari <- summary(pnone.fit)$coefficients$cond[,3]["P_Neocortical1"]
+  sum.stat <- rbind(sum.stat.clim, sum.stat.cpari)
+
+  #Get the beta estimates for fold-change calcs
+  pnone.fit.est <- createCoeftab(pnone.fit)[1:2,]
+  #Extract the LRT p-values *UNADJUSTED*
+  #None as the ref for cingulate
+  pnone.fit.lrtpval <- pnone.lrt$`Pr(>Chi)`[2:3]
+  #Build the output df
+  pnone.fit.est$pval <- pnone.fit.lrtpval
+  #Add the z-stat
+  pnone.fit.est$zstat <- sum.stat
+
+  return(list(cingulate = cnone.fit.est, parietal = pnone.fit.est))
+}
+
+#Use beta regression
+set.seed(12837)
+methylcyto.fit.1 <- mclapply(all_bvals.t.chnk1, function(x) EPIC.beta.fit(x, glial, randeff), mc.preschedule = F, mc.cores = 40)
+
+#Save the output
+save(methylcyto.fit.1, file = "./Output_5mC_results/all_bvals_mc.results.nopmi.chnk1.RData")
+```
