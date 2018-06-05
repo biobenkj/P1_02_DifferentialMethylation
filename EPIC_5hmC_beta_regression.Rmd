@@ -1,0 +1,172 @@
+---
+title: "EPIC_zibeta_regression"
+author: "Ben Johnson"
+date: "6/4/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loadlibs}
+
+library(plyr)
+library(dplyr)
+
+```
+
+
+```{r divintochnks}
+#Read in the 5hmC beta value matrix
+load("./Input/oxBSMLE_betas.RData")
+
+#Combine the cingulate and parietal beta value matrices
+hydroxymethylcyto.c.df <- as.data.frame(hydroxymethylcyto.c)
+hydroxymethylcyto.c.df$probes <- rownames(hydroxymethylcyto.c.df)
+
+hydroxymethylcyto.p.df <- as.data.frame(hydroxymethylcyto.p)
+hydroxymethylcyto.p.df$probes <- rownames(hydroxymethylcyto.p.df)
+
+#Join by common probes
+all_bvals_hmc <- plyr::join(hydroxymethylcyto.c.df, hydroxymethylcyto.p.df, by = "probes")
+all_bvals_hmc$probes <- NULL
+all_bvals_hmc <- subset(all_bvals_hmc, complete.cases(all_bvals_hmc))
+all_bvals_hmc.t <- as.data.frame(t(all_bvals_hmc))
+
+##Chunk the data frame for multiple node processing
+all_bvals_hmc.t.chnk1 <- all_bvals_hmc.t[,c(1:100000)]
+all_bvals_hmc.t.chnk2 <- all_bvals_hmc.t[,c(100001:200000)]
+all_bvals_hmc.t.chnk3 <- all_bvals_hmc.t[,c(200001:300000)]
+all_bvals_hmc.t.chnk4 <- all_bvals_hmc.t[,c(300001:400000)]
+all_bvals_hmc.t.chnk5 <- all_bvals_hmc.t[,c(400001:500000)]
+all_bvals_hmc.t.chnk6 <- all_bvals_hmc.t[,c(500001:600000)]
+all_bvals_hmc.t.chnk7 <- all_bvals_hmc.t[,c(600001:700000)]
+all_bvals_hmc.t.chnk8 <- all_bvals_hmc.t[,c(700001:764742)]
+
+##Save all the chunks as rda files
+saveRDS(all_bvals_hmc.t.chnk1, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk1.rda")
+saveRDS(all_bvals_hmc.t.chnk2, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk2.rda")
+saveRDS(all_bvals_hmc.t.chnk3, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk3.rda")
+saveRDS(all_bvals_hmc.t.chnk4, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk4.rda")
+saveRDS(all_bvals_hmc.t.chnk5, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk5.rda")
+saveRDS(all_bvals_hmc.t.chnk6, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk6.rda")
+saveRDS(all_bvals_hmc.t.chnk7, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk7.rda")
+saveRDS(all_bvals_hmc.t.chnk8, "./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk8.rda")
+```
+
+```{r gamlss}
+
+#This is a boilerplate script to process a single chunk of probes on a 40 core node
+
+library(plyr)
+library(dplyr)
+library(gamlss)
+library(parallel)
+
+#Load in raw beta value matrix
+all_bvals.t.chnk1 <- readRDS("./Output_beta_chunks_5hmC/all_bvals_hmc.t.chnk1.rda")
+
+#New meta data that also includes the glial proportions
+metadata <- read.table("./meta_data.txt", header = T, check.names = F, stringsAsFactors = F)
+
+#Get the glial cell composition
+glial <- metadata$glial[which(metadata$Assay == "B")]
+
+#Build the design
+
+C_None <- as.factor(c(rep(1, 3), rep(0, 6)))
+
+C_Limbic <- as.factor(c(rep(0, 3), rep(1, 3), rep(0, 3)))
+
+C_Neocortical <- as.factor(c(rep(0, 6), rep(1, 3)))
+
+P_None <- as.factor(c(rep(1, 3), rep(0, 6)))
+
+P_Limbic <- as.factor(c(rep(0, 3), rep(1, 3), rep(0, 3)))
+
+P_Neocortical <- as.factor(c(rep(0, 6), rep(1, 3)))
+
+#Filter columns with all zeros
+keep <- colSums(all_bvals_hmc.t.chnk1)>0
+
+all_bvals_hmc.t.chnk1 <- all_bvals_hmc.t.chnk1[,keep]
+
+#recode values to 0 or 1 for filter
+boolfilt <- t(all_bvals_hmc.t.chnk1)
+boolfilt[boolfilt > 0] <- 1
+
+#only keep probes that have at least 3 sample values greater than 0
+keep <- rowSums(boolfilt) >= 3
+
+all_bvals_hmc.t.chnk1 <- t(t(all_bvals_hmc.t.chnk1)[keep,])
+
+#ZIBeta regression with a logit link function
+EPIC.beta.fit <- function(x, cellcomp) {
+  x <- as.data.frame(x)
+  x$glial <- cellcomp
+  
+  #Subset the data to stratify by brain region
+  cing.data <- x[1:9,]
+  pari.data <- x[10:18,]
+  
+  #Fit models for all tissues
+  #Fit with zibeta regression with C_None as the reference
+  cnone.fit <- gamlss(x ~ C_Limbic + C_Neocortical + glial, data = cing.data, family = BEZI, trace = F)
+  #Refit with reduced model C_Limbic
+  cnone.fit2 <- gamlss(x ~ C_Neocortical + glial, data = cing.data, family = BEZI, trace = F)
+  #Refit with reduced model C_Neocortical
+  cnone.fit3 <- gamlss(x ~ C_Limbic + glial, data = cing.data, family = BEZI, trace = F)
+  #Calc LRT p-values for cingulate limbic tissues relative to C_none
+  cnone.lrt.limbic <- try(LR.test(cnone.fit2, cnone.fit, print = F)$p.val)
+  if (class(cnone.lrt.limbic) == "try-error") {
+    cnone.lrt.limbic <- NA
+  }
+  #Calc LRT p-values for cingulate neocortical tissues relative to C_none
+  cnone.lrt.neocortical <- try(LR.test(cnone.fit3, cnone.fit, print = F)$p.val)
+  if (class(cnone.lrt.neocortical) == "try-error") {
+    cnone.lrt.neocortical <- NA
+  }
+
+  #Get the beta estimates for fold-change calcs
+  cnone.fit.sum <- as.data.frame(summary(cnone.fit))[c(2:3),c(1:3)]
+  #Build the output df
+  cnone.fit.sum$pval <- rbind(cnone.lrt.limbic, cnone.lrt.neocortical)
+  
+  
+    
+  #Fit models for parietal tissues
+  #Fit with beta regression with P_None as the reference
+  pnone.fit <- gamlss(x ~ P_Limbic + P_Neocortical + glial, data = pari.data, family = BEZI, trace = F)
+  #Fit reduced model with P_Limbic dropped
+  pnone.fit2 <- gamlss(x ~ P_Neocortical + glial, data = pari.data, family = BEZI, trace = F)
+  #Fit reduced model with P_Neocortical dropped
+  pnone.fit3 <- gamlss(x ~ P_Limbic + glial, data = pari.data, family = BEZI, trace = F)
+  #Calc LRT p-values for parietal tissues relative to P_none
+  pnone.lrt.limbic <- try(LR.test(pnone.fit2, pnone.fit, print = F)$p.val)
+  if (class(pnone.lrt.limbic) == "try-error") {
+    pnone.lrt.limbic <- NA
+  }
+  #Calc LRT p-values for parietal neocortical tissues relative to P_none
+  pnone.lrt.neocortical <- try(LR.test(pnone.fit3, pnone.fit, print = F)$p.val)
+  if (class(pnone.lrt.neocortical) == "try-error") {
+    pnone.lrt.neocortical <- NA
+  }
+  
+  #Get the beta estimates for fold-change calcs
+  pnone.fit.sum <- as.data.frame(summary(pnone.fit))[c(2:3),c(1:3)]
+  #Build the output df
+  pnone.fit.sum$pval <- rbind(pnone.lrt.limbic, pnone.lrt.neocortical)
+  
+  return(list(cingulate = cnone.fit.sum,
+              parietal = pnone.fit.sum))
+}
+
+#Use zibeta regression
+#This takes about 2 days to run per assay type (e.g. BS and oxBS)
+set.seed(12837)
+hydroxymethylcyto.fit.1 <- mclapply(as.data.frame(all_bvals_hmc.t.chnk1), function(x) EPIC.beta.fit(x, glial), mc.preschedule = F, mc.cores = 40)
+
+#Save the output
+save(hydroxymethylcyto.fit.1, file = "./Output_5mC_results/all_bvals_hmc.results.chnk1.RData")
+```
