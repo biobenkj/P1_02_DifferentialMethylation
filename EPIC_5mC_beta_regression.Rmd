@@ -32,7 +32,7 @@ methylcyto.p.df$probes <- rownames(methylcyto.p.df)
 all_bvals <- plyr::join(methylcyto.c.df, methylcyto.p.df, by = "probes")
 all_bvals$probes <- NULL
 all_bvals <- subset(all_bvals, complete.cases(all_bvals))
-all_bvals.t <- as.data.frame(t(methylcyto.c))
+all_bvals.t <- as.data.frame(t(all_bvals))
 
 ##Chunk the data frame for multiple node processing
 all_bvals.t.chnk1 <- all_bvals.t[,c(1:100000)]
